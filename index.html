@@ -628,17 +628,19 @@ lightObjs.push(mainPl);
 const ceilLight=lightObjs[0];
 
 /* ═══════════════════════════════════════════════════════════
-   GLB MODEL URLS — relative paths (same-origin on GitHub Pages)
-   Primary: relative (./filename.glb) — works when hosted same-origin
-   Fallback: jsDelivr CDN
+   GLB MODEL URLS
+   jsDelivr CDN — proxies GitHub raw files with CORS headers.
+   Format: https://cdn.jsdelivr.net/gh/USER/REPO@BRANCH/FILE
 ═══════════════════════════════════════════════════════════ */
-const GLB_TV    = './crt_tv.glb';
-const GLB_VHS   = './vhs_player.glb';
-const GLB_RACK  = './rack_vhs.glb';
-// CDN fallbacks
-const GLB_TV_FB   = 'https://cdn.jsdelivr.net/gh/vyrexmy-bit/Backroom-assets@main/crt_tv.glb';
-const GLB_VHS_FB  = 'https://cdn.jsdelivr.net/gh/vyrexmy-bit/Backroom-assets@main/vhs_player.glb';
-const GLB_RACK_FB = 'https://cdn.jsdelivr.net/gh/vyrexmy-bit/Backroom-assets@main/rack_vhs.glb';
+const GLB_BASE  = './';
+const GLB_TV    = GLB_BASE + 'crt_tv.glb';
+const GLB_VHS   = GLB_BASE + 'vhs_player.glb';
+const GLB_RACK  = GLB_BASE + 'rack_vhs.glb';
+// Secondary fallback via github.io Pages
+const GLB_BASE2 = './';
+const GLB_TV_FB   = GLB_BASE2 + 'crt_tv.glb';
+const GLB_VHS_FB  = GLB_BASE2 + 'vhs_player.glb';
+const GLB_RACK_FB = GLB_BASE2 + 'rack_vhs.glb';
 
 /* ═══════════════════════════════════════════════════════════
    SHARED LOADER — tries primary URL, falls back to proxy
@@ -646,21 +648,9 @@ const GLB_RACK_FB = 'https://cdn.jsdelivr.net/gh/vyrexmy-bit/Backroom-assets@mai
 const gltfLoader = new THREE.GLTFLoader();
 
 function fetchGLB(url) {
-  return new Promise(function(resolve, reject) {
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', url, true);
-    xhr.responseType = 'arraybuffer';
-    xhr.onload = function() {
-      if(xhr.status >= 200 && xhr.status < 300) {
-        resolve(xhr.response);
-      } else {
-        reject(new Error('HTTP '+xhr.status+': '+url));
-      }
-    };
-    xhr.onerror  = function(){ reject(new Error('Network error: '+url)); };
-    xhr.ontimeout= function(){ reject(new Error('Timeout: '+url)); };
-    xhr.timeout  = 30000;
-    xhr.send();
+  return fetch(url).then(function(r){
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.arrayBuffer();
   });
 }
 
@@ -668,7 +658,7 @@ function loadGLB(primaryUrl, fallbackUrl, onLoad, onError) {
   var scope = gltfLoader;
   fetchGLB(primaryUrl)
     .catch(function(e){
-      console.warn('Primary failed ('+primaryUrl+'), trying fallback...');
+      console.warn('Primary failed ('+primaryUrl+'), trying proxy...');
       return fetchGLB(fallbackUrl);
     })
     .then(function(data){
@@ -796,76 +786,47 @@ scene.add(tvStation);
 // ── Loading indicator ──
 function notifLoad(msg){ notif2(msg); }
 
-function debugModel(name, model) {
-  var meshCount = 0;
-  var totalVerts = 0;
-  model.traverse(function(obj){
-    if(obj.isMesh){
-      meshCount++;
-      if(obj.geometry && obj.geometry.attributes.position){
-        totalVerts += obj.geometry.attributes.position.count;
-      }
-    }
-  });
-  var box = new THREE.Box3().setFromObject(model);
-  var sz = new THREE.Vector3();
-  box.getSize(sz);
-  console.log('['+name+'] meshes:'+meshCount+' verts:'+totalVerts+
-    ' size:('+sz.x.toFixed(3)+','+sz.y.toFixed(3)+','+sz.z.toFixed(3)+')'+
-    ' isEmpty:'+box.isEmpty());
-  return {meshCount:meshCount, totalVerts:totalVerts, size:sz, empty:box.isEmpty()};
-}
-
 /* ── RACK ── */
 const rackGroup = new THREE.Group();
 tvStation.add(rackGroup);
 
-loadGLB(GLB_RACK, GLB_RACK_FB, function(model) {
-  var dbg = debugModel('RACK', model);
-
-  if(dbg.empty || dbg.totalVerts === 0) {
-    console.error('RACK model has no geometry! Check GLB parser.');
-    notifLoad('RACK: NO GEOMETRY');
-    // Still add it so we can inspect in console
-    rackGroup.add(model);
-    return;
-  }
-
-  var targetH = 1.80;
-  var scaleR  = targetH / dbg.size.y;
-  // Guard against insane scale
-  if(!isFinite(scaleR) || scaleR <= 0 || scaleR > 1000) scaleR = 1.0;
-  model.scale.setScalar(scaleR);
-
-  // Re-centre after scale
-  var box2 = new THREE.Box3().setFromObject(model);
-  var min2 = new THREE.Vector3();
-  var ctr  = new THREE.Vector3();
-  box2.getMin(min2);
-  box2.getCenter(ctr);
-  model.position.y = -min2.y;
-  model.position.x = -ctr.x;
-  model.position.z = -ctr.z;
-
+// Compute bbox from raw geometry — no world matrix needed
+function geoBBox(model) {
+  var box = new THREE.Box3();
   model.traverse(function(obj){
-    if(obj.isMesh){ obj.castShadow=true; obj.receiveShadow=true; }
+    if(obj.isMesh && obj.geometry){
+      obj.geometry.computeBoundingBox();
+      var gb = obj.geometry.boundingBox;
+      if(gb) box.expandByPoint(gb.min).expandByPoint(gb.max);
+    }
   });
+  return box;
+}
 
+loadGLB(GLB_RACK, GLB_RACK_FB, function(model) {
+  var box = geoBBox(model);
+  var sz  = new THREE.Vector3(); box.getSize(sz);
+  var scaleR = sz.y > 0 ? 1.80 / sz.y : 1.0;
+  model.scale.setScalar(scaleR);
+  // Re-bbox after scale
+  var box2 = new THREE.Box3();
+  box2.min.copy(box.min).multiplyScalar(scaleR);
+  box2.max.copy(box.max).multiplyScalar(scaleR);
+  var ctr = new THREE.Vector3(); box2.getCenter(ctr);
+  model.position.set(-ctr.x, -box2.min.y, -ctr.z);
+  model.traverse(function(o){ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; }});
   rackGroup.add(model);
-  console.log('[RACK] scale:'+scaleR.toFixed(4)+' final pos:',model.position);
+  console.log('[RACK] scale:'+scaleR.toFixed(3)+' size:'+sz.x.toFixed(2)+'x'+sz.y.toFixed(2)+'x'+sz.z.toFixed(2));
   notifLoad('RACK LOADED');
-}, function(e){ console.error('RACK LOAD FAILED',e); showModelError('RACK'); });
+}, function(e){ showModelError('RACK'); console.error('RACK FAIL',e); });
 
 /* ── TV ── */
 const tvGroup = new THREE.Group();
-// TV sits on top shelf y=1.22 + shelf thickness 0.019 + half TV height (auto)
-// We position tvGroup at y=0 and let model fitting handle vertical placement
 tvGroup.position.set(0, 0, 0);
 tvStation.add(tvGroup);
 
 // Screen system lives inside tvGroup
 const screenSys = buildScreenSystem(tvGroup, 1.0);
-// Destructure for game logic compatibility
 const crtMat    = screenSys.crtMat;
 const cTex      = screenSys.cTex;
 const glowMat   = screenSys.gwMat;
@@ -873,102 +834,57 @@ const tvGlow    = screenSys.tvGlow;
 const tvLedMat  = screenSys.ledMat;
 
 loadGLB(GLB_TV, GLB_TV_FB, function(model) {
-  var dbg = debugModel('TV', model);
-
-  if(dbg.empty || dbg.totalVerts === 0) {
-    console.error('TV model has no geometry!');
-    notifLoad('TV: NO GEOMETRY');
-    tvGroup.add(model);
-    return;
-  }
-
-  var targetW = 0.60;
-  var scaleT  = targetW / dbg.size.x;
-  if(!isFinite(scaleT) || scaleT <= 0 || scaleT > 1000) scaleT = 1.0;
+  var box = geoBBox(model);
+  var sz  = new THREE.Vector3(); box.getSize(sz);
+  var scaleT = sz.x > 0 ? 0.60 / sz.x : 1.0;
   model.scale.setScalar(scaleT);
-
+  var box2 = new THREE.Box3();
+  box2.min.copy(box.min).multiplyScalar(scaleT);
+  box2.max.copy(box.max).multiplyScalar(scaleT);
+  var ctr2 = new THREE.Vector3(); box2.getCenter(ctr2);
   var shelfTop = 1.239;
-  var box2 = new THREE.Box3().setFromObject(model);
-  var min2 = new THREE.Vector3();
-  var ctr2 = new THREE.Vector3();
-  box2.getMin(min2);
-  box2.getCenter(ctr2);
-
-  model.position.y = shelfTop - min2.y;
-  model.position.x = -ctr2.x;
-  model.position.z = -ctr2.z;
-
-  model.traverse(function(obj){
-    if(obj.isMesh){
-      obj.castShadow = true;
-      obj.receiveShadow = true;
-      var nm = (obj.name || '').toLowerCase();
-      var matName = (obj.material && obj.material.name ? obj.material.name : '').toLowerCase();
-      if(nm.includes('screen') || nm.includes('glass') || nm.includes('crt') ||
-         matName.includes('screen') || matName.includes('glass') || matName.includes('emit')) {
-        obj.userData.noHighlight = true;
-        obj.material = crtMat;
+  model.position.set(-ctr2.x, shelfTop - box2.min.y, -ctr2.z);
+  model.traverse(function(o){
+    if(o.isMesh){
+      o.castShadow=true; o.receiveShadow=true;
+      var nm=(o.name||'').toLowerCase();
+      var mn=(o.material&&o.material.name?o.material.name:'').toLowerCase();
+      if(nm.includes('screen')||nm.includes('crt')||mn.includes('screen')||mn.includes('emit')){
+        o.userData.noHighlight=true; o.material=crtMat;
       }
     }
   });
-
   tvGroup.add(model);
-
-  var box3 = new THREE.Box3().setFromObject(model);
-  var ctr3 = new THREE.Vector3();
-  var max3 = new THREE.Vector3();
-  box3.getCenter(ctr3);
-  box3.getMax(max3);
-  screenSys.positionScreen(max3.z - 0.01, ctr3.x, ctr3.y + 0.02);
-
-  console.log('[TV] scale:'+scaleT.toFixed(4)+' pos:',model.position,' screenZ:'+max3.z.toFixed(3));
+  // Screen sits at front face (max Z after scale + position)
+  var frontZ = box2.max.z + model.position.z;
+  var centX  = ctr2.x + model.position.x;
+  var centY  = ctr2.y + model.position.y;
+  screenSys.positionScreen(frontZ - 0.01, 0, centY);
+  console.log('[TV] scale:'+scaleT.toFixed(3)+' size:'+sz.x.toFixed(2)+'x'+sz.y.toFixed(2)+'x'+sz.z.toFixed(2)+' frontZ:'+frontZ.toFixed(3));
   notifLoad('TV LOADED');
-}, function(e){ console.error('TV LOAD FAILED',e); showModelError('TV'); });
+}, function(e){ showModelError('TV'); console.error('TV FAIL',e); });
 
 /* ── VHS PLAYER ── */
 const vhsGroup = new THREE.Group();
-// VHS sits on mid shelf y=0.68 + 0.019 = 0.699 bottom, centre at 0.699 + half height
 vhsGroup.position.set(0, 0, 0);
 tvStation.add(vhsGroup);
 
 loadGLB(GLB_VHS, GLB_VHS_FB, function(model) {
-  var dbg = debugModel('VHS', model);
-
-  if(dbg.empty || dbg.totalVerts === 0) {
-    console.error('VHS model has no geometry!');
-    notifLoad('VHS: NO GEOMETRY');
-    vhsGroup.add(model);
-    return;
-  }
-
-  var targetW = 0.55;
-  var scaleV  = targetW / dbg.size.x;
-  if(!isFinite(scaleV) || scaleV <= 0 || scaleV > 1000) scaleV = 1.0;
+  var box = geoBBox(model);
+  var sz  = new THREE.Vector3(); box.getSize(sz);
+  var scaleV = sz.x > 0 ? 0.55 / sz.x : 1.0;
   model.scale.setScalar(scaleV);
-
+  var box2 = new THREE.Box3();
+  box2.min.copy(box.min).multiplyScalar(scaleV);
+  box2.max.copy(box.max).multiplyScalar(scaleV);
+  var ctr2 = new THREE.Vector3(); box2.getCenter(ctr2);
   var shelfMid = 0.699;
-  var box2 = new THREE.Box3().setFromObject(model);
-  var min2 = new THREE.Vector3();
-  var ctr2 = new THREE.Vector3();
-  box2.getMin(min2);
-  box2.getCenter(ctr2);
-
-  model.position.y = shelfMid - min2.y;
-  model.position.x = -ctr2.x;
-  model.position.z = -ctr2.z;
-
-  model.traverse(function(obj){
-    if(obj.isMesh){ obj.castShadow=true; obj.receiveShadow=true; }
-  });
-
-  var box3 = new THREE.Box3().setFromObject(model);
-  vhsGroup.userData.rearZ   = box3.min.z + vhsGroup.position.z + tvStation.position.z;
-  vhsGroup.userData.centerY = box3.getCenter(new THREE.Vector3()).y + vhsGroup.position.y;
-
+  model.position.set(-ctr2.x, shelfMid - box2.min.y, -ctr2.z);
+  model.traverse(function(o){ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; }});
   vhsGroup.add(model);
-  console.log('[VHS] scale:'+scaleV.toFixed(4)+' pos:',model.position);
+  console.log('[VHS] scale:'+scaleV.toFixed(3)+' size:'+sz.x.toFixed(2)+'x'+sz.y.toFixed(2)+'x'+sz.z.toFixed(2));
   notifLoad('VHS LOADED');
-}, function(e){ console.error('VHS LOAD FAILED',e); showModelError('VHS'); });
+}, function(e){ showModelError('VHS'); console.error('VHS FAIL',e); });
 
 /* ── Enable shadows on everything added to station ── */
 tvStation.traverse(function(obj){
