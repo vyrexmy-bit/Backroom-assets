@@ -247,9 +247,11 @@ GLTFLoader.prototype = {
       // ── Scenes ──
       var sceneIdx = json.scene !== undefined ? json.scene : 0;
       var gltfScene = json.scenes[sceneIdx];
-      (gltfScene.nodes||[]).forEach(function(ni){ scene.add(buildNode(ni)); });
+      var root = new THREE.Group();
+      root.name = 'GLTFRoot';
+      (gltfScene.nodes||[]).forEach(function(ni){ root.add(buildNode(ni)); });
 
-      onLoad({ scene: scene, scenes:[scene], animations:[], asset: json.asset||{} });
+      onLoad({ scene: root, scenes:[root], animations:[], asset: json.asset||{} });
 
     } catch(e){
       onError && onError(e);
@@ -662,10 +664,13 @@ function loadGLB(primaryUrl, fallbackUrl, onLoad, onError) {
       return fetchGLB(fallbackUrl);
     })
     .then(function(data){
-      scope.parse(data, primaryUrl, onLoad, function(e){
-        console.error('GLB parse failed:', e);
-        onError && onError(e);
-      });
+      scope.parse(data, primaryUrl,
+        function(gltf){ onLoad(gltf.scene); },  // unwrap .scene
+        function(e){
+          console.error('GLB parse failed:', e);
+          onError && onError(e);
+        }
+      );
     })
     .catch(function(err){
       console.error('GLB load failed completely:', primaryUrl, err);
